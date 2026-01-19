@@ -7,7 +7,6 @@
 // Tuyệt đối tránh chân 35, 36, 37 (PSRAM) và 43, 44 (UART)
 #define PIN_STEERING  1   // Biến trở Lái (ADC1_CH0)
 #define PIN_THROTTLE  2   // Biến trở Ga (ADC1_CH1)
-#define PIN_MODE_BTN  42  // Nút chuyển chế độ (Nối GND khi bấm)
 
 // 2. CẤU HÌNH KẾT NỐI (MAC SPOOFING)
 // Địa chỉ MAC tự quy định (Thay đổi tùy thích, miễn là khớp với Xe)
