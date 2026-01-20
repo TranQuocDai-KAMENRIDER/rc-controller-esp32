@@ -5,7 +5,7 @@
 
 // --- CẤU HÌNH GIAO THỨC ---
 // Định nghĩa cấu trúc gói tin gửi đi
-typedef struct {
+typedef struct  __attribute__((packed)) {
     uint8_t startByte;    // Luôn là 0xAA (Dấu hiệu nhận biết)
     uint32_t packetId;    // Số đếm gói tin (để biết sóng tốt hay rớt gói)
     int16_t throttle;     // Ga: -255 (Lùi) đến 255 (Tiến)
