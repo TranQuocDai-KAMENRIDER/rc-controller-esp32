@@ -7,111 +7,103 @@
 // Tuyệt đối tránh chân 35, 36, 37 (PSRAM) và 43, 44 (UART)
 #define PIN_STEERING  1   // Biến trở Lái (ADC1_CH0)
 #define PIN_THROTTLE  2   // Biến trở Ga (ADC1_CH1)
-
-// 2. CẤU HÌNH KẾT NỐI (MAC SPOOFING)
+// 2. CẤU HÌNH LOGIC
+// Bộ lọc EMA (Exponential Moving Average) giúp joystick siêu mượt
+// Giá trị càng nhỏ càng mượt (nhưng trễ hơn), càng lớn càng nhạy. 0.25 là đẹp.
+const float EMA_ALPHA = 0.25f; 
+float emaThrottle = 0; // Biến lưu giá trị lọc Ga
+float emaSteering = 0; // Biến lưu giá trị lọc Lái
+// 3. CẤU HÌNH KẾT NỐI (MAC SPOOFING)
 // Địa chỉ MAC tự quy định (Thay đổi tùy thích, miễn là khớp với Xe)
-uint8_t macTayCam[] = {0xA0, 0x22, 0x22, 0x22, 0x22, 0x22}; 
-uint8_t macCuaXe[]  = {0xA0, 0x11, 0x11, 0x11, 0x11, 0x11}; 
+uint8_t macTayCam[] = {0x27, 0xAE, 0xAE, 0xAE, 0xAE, 0x02}; 
+uint8_t macCuaXe[]  = {0x02, 0xAE, 0xAE, 0xAE, 0xAE, 0x27}; 
 
 ControlPacket myPacket;
 esp_now_peer_info_t peerInfo;
 
-// Biến trạng thái
-bool isAutoMode = false;       // Mặc định là lái tay
-unsigned long lastDebounce = 0; // Chống rung nút bấm
-
-// 3. CÁC HÀM XỬ LÝ LOGIC
-// Hàm xử lý Joystick: Biến đổi ADC (0-4095) sang giá trị điều khiển
-int processJoystick(int input, int minOut, int maxOut, int deadzone) {
-    int center = 2048; // Điểm giữa lý thuyết của ESP32 (12-bit)
-    
-    // Nếu giá trị nằm trong vùng chết -> Trả về điểm giữa
-    if (abs(input - center) < deadzone) {
-        return (minOut + maxOut) / 2;
-    }
-    return map(input, 0, 4095, minOut, maxOut);
-}
-
-// Hàm xử lý Cò ga riêng (vì điểm giữa phải là 0)
+// 3. CÁC HÀM XỬ LÝ SỐ LIỆU
+// Hàm map có lọc nhiễu cho GA
 int processThrottle(int input) {
     int center = 2048;
-    if (abs(input - center) < 200) return 0; // Deadzone 200
-    return map(input, 0, 4095, -255, 255);
+    int deadzone = 200; 
+
+    // 1. Lọc nhiễu (EMA Filter)
+    emaThrottle = (1.0f - EMA_ALPHA) * emaThrottle + EMA_ALPHA * (float)input;
+    int smoothInput = (int)emaThrottle;
+
+    // 2. Xử lý vùng chết
+    if (abs(smoothInput - center) < deadzone) return 0;
+
+    // 3. Map sang dải tốc độ (-255 đến 255)
+    return map(smoothInput, 0, 4095, -255, 255); 
 }
 
-// 4. SETUP & LOOP
+// Hàm map có lọc nhiễu cho LÁI
+int processSteering(int input) {
+    int center = 2048; 
+    int deadzone = 100; // Vùng chết nhỏ hơn cho lái chính xác
+
+    // 1. Lọc nhiễu
+    emaSteering = (1.0f - EMA_ALPHA) * emaSteering + EMA_ALPHA * (float)input;
+    int smoothInput = (int)emaSteering;
+
+    // 2. Xử lý vùng chết (về giữa)
+    if (abs(smoothInput - center) < deadzone) return 90;
+
+    // 3. Map sang góc lái (0 đến 180)
+    return map(smoothInput, 0, 4095, 0, 180); 
+}
+
+// ================================================================
+// 5. SETUP & LOOP
+// ================================================================
 void setup() {
     Serial.begin(115200);
     
-    // Cấu hình chân IO
     pinMode(PIN_STEERING, INPUT);
     pinMode(PIN_THROTTLE, INPUT);
-    pinMode(PIN_MODE_BTN, INPUT_PULLUP); // Quan trọng: Kéo lên nguồn
+    // KHÔNG CÒN pinMode(PIN_MODE_BTN) nữa
 
-    // --- CÀI ĐẶT ESP-NOW & MAC ---
     WiFi.mode(WIFI_STA);
-    esp_wifi_set_mac(WIFI_IF_STA, &macTayCam[0]); // Ép dùng MAC A0:22...
+    esp_wifi_set_mac(WIFI_IF_STA, &macTayCam[0]);
     
-    if (esp_now_init() != ESP_OK) {
-        Serial.println("Lỗi khởi tạo ESP-NOW!");
-        return;
-    }
+    if (esp_now_init() != ESP_OK) return;
 
-    // Đăng ký địa chỉ của XE
     memcpy(peerInfo.peer_addr, macCuaXe, 6);
     peerInfo.channel = 0;  
     peerInfo.encrypt = false;
-    
-    if (esp_now_add_peer(&peerInfo) != ESP_OK){
-        Serial.println("Lỗi kết nối với Xe!");
-        return;
-    }
+    esp_now_add_peer(&peerInfo);
 
-    Serial.println("TAY CAM S3-N16R8 DA SAN SANG!");
-    Serial.print("Dia chi MAC cua toi: ");
-    Serial.println(WiFi.macAddress());
+    Serial.println("TAY CAM PRO READY!");
 }
 
 void loop() {
-    // A. ĐỌC NÚT BẤM (Chuyển chế độ)
-    if (digitalRead(PIN_MODE_BTN) == LOW) {
-        if (millis() - lastDebounce > 300) { // Chỉ nhận 1 lần mỗi 300ms
-            isAutoMode = !isAutoMode;
-            lastDebounce = millis();
-            Serial.println(isAutoMode ? ">>> CHẾ ĐỘ: AUTO" : ">>> CHẾ ĐỘ: MANUAL");
-        }
-    }
-
-    // B. ĐỌC & XỬ LÝ JOYSTICK
-    // Đọc ADC (Nếu chưa cắm phần cứng, chân này sẽ nhảy loạn xạ - Bình thường)
+    // 1. Đọc ADC
     int rawSteer = analogRead(PIN_STEERING);
     int rawThrot = analogRead(PIN_THROTTLE);
 
-    // Chuẩn bị gói tin
+    // 2. Xử lý & Đóng gói
     myPacket.startByte = 0xAA;
-    myPacket.packetId++; // Tăng số thứ tự gói tin
+    myPacket.packetId++;
     
-    // Xử lý logic
-    myPacket.steering = processJoystick(rawSteer, 0, 180, 150); // Góc servo 0-180
-    myPacket.throttle = processThrottle(rawThrot);              // Tốc độ -255 đến 255
-    myPacket.mode = isAutoMode ? 1 : 0;
+    // Logic mới (có lọc nhiễu)
+    myPacket.steering = processSteering(rawSteer);
+    myPacket.throttle = processThrottle(rawThrot);
     
-    // Tính checksum cuối cùng
+    // Vì bỏ nút bấm, ta luôn để mode = 0 (Manual) để khớp với Protocol cũ
+    myPacket.mode = 0; 
+    
     myPacket.checksum = calculateChecksum(&myPacket);
 
-    // C. GỬI DỮ LIỆU
+    // 3. Gửi đi
     esp_err_t result = esp_now_send(macCuaXe, (uint8_t *) &myPacket, sizeof(myPacket));
 
-    // D. DEBUG (In ra để bạn kiểm tra logic trên màn hình)
-    // Dùng printf để in gọn 1 dòng
-    Serial.printf("ID: %d | Mode: %s | Lai: %d | Ga: %d | Checksum: %d | Gui: %s\n", 
-        myPacket.packetId,
-        isAutoMode ? "AUTO" : "MANUAL",
+    // 4. Debug
+    Serial.printf("Ga: %d | Lai: %d | Mode: 0 (Fixed) | %s\n", 
+        myPacket.throttle,   
         myPacket.steering,
-        myPacket.throttle,
-        myPacket.checksum,
-        result == ESP_OK ? "OK" : "LOI"
+        result == ESP_OK ? "OK" : ".."
     );
 
-    delay(20); // Gửi 50 lần/giây
+    delay(20); 
 }
